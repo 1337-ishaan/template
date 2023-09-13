@@ -1,14 +1,32 @@
-// SPDX-License-Identifier: MIT
-pragma solidity 0.8.7;
-
+ // SPDX-License-Identifier: MIT
+ pragma solidity 0.8.7;
+ 
 import "@openzeppelin/contracts/interfaces/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+ // highlight-next-line
+import "@zetachain/protocol-contracts/contracts/evm/Zeta.eth.sol";
 import "@zetachain/protocol-contracts/contracts/evm/tools/ZetaInteractor.sol";
 import "@zetachain/protocol-contracts/contracts/evm/interfaces/ZetaInterfaces.sol";
-
-interface MultiChainValueErrors {
+ 
+/**
+ * @dev Custom errors for contract MultiChainValue
+ */
+ interface MultiChainValueErrors {
     error InvalidMessageType();
+    // highlight-start
+    error ErrorTransferringZeta();
+    error ChainIdAlreadyEnabled();
+    error ChainIdNotAvailable();
+    error InvalidZetaValueAndGas();
+    // highlight-end
 }
+
+
+ 
+/**
+ * @dev MultiChainValue goal is to send Zeta token across all supported chains
+ * Extends the logic defined in ZetaInteractor to handle multichain standards
+ */
 
 contract MultiChainValue is
     ZetaInteractor,
@@ -16,35 +34,58 @@ contract MultiChainValue is
     MultiChainValueErrors
 {
     bytes32 public constant MULTI_CHAIN_VALUE_MESSAGE_TYPE =
-        keccak256("CROSS_CHAIN_MULTI_CHAIN_VALUE");
-
+        keccak256("MULTI_CHAIN_VALUE");
+ 
     event MultiChainValueEvent();
     event MultiChainValueRevertedEvent();
+ 
+    //highlight-next-line
+    address public _zetaToken;
 
-    ZetaTokenConsumer private immutable _zetaConsumer;
-    IERC20 internal immutable _zetaToken;
-
+    // @dev map of valid chains to send Zeta
+    // highlight-next-line
+    mapping(uint256 => bool) public availableChainIds;
+ 
+    // @dev Constructor calls ZetaInteractor's constructor to setup Connector address and current chain
     constructor(
         address connectorAddress,
-        address zetaTokenAddress,
-        address zetaConsumerAddress
+        address zetaTokenAddress
     ) ZetaInteractor(connectorAddress) {
-        _zetaToken = IERC20(zetaTokenAddress);
-        _zetaConsumer = ZetaTokenConsumer(zetaConsumerAddress);
+         // highlight-next-line
+        if (zetaTokenAddress == address(0)) revert ZetaCommonErrors.InvalidAddress();
+
+        // hightlight-next-line
+        _zetaToken = zetaTokenAddress;
     }
 
-    function sendMessage(uint256 destinationChainId) external payable {
-        if (!_isValidChainId(destinationChainId))
-            revert InvalidDestinationChainId();
+    /**
+     * @dev Whitelist a chain to send Zeta
+     */
 
-        uint256 crossChainGas = 2 * (10 ** 18);
-        uint256 zetaValueAndGas = _zetaConsumer.getZetaFromEth{
-            value: msg.value
-        }(address(this), crossChainGas);
-        _zetaToken.approve(address(connector), zetaValueAndGas);
+    function sendMessage(uint256 destinationChainId, uint256 zetaValueAndGas) external payable {
+    // highlight-next-line
+        if (!availableChainIds[destinationChainId]) revert InvalidDestinationChainId();
+        //remove-next-line
+        // _zetaToken.approve(address(connector), zetaValueAndGas);
+
+        // highlight-next-line   
+        if (zetaValueAndGas == 0) revert InvalidZetaValueAndGas();
+
+        // highlight-start
+        bool success1 = ZetaEth(_zetaToken).approve(
+            address(connector),
+            zetaValueAndGas
+        );
+        bool success2 = ZetaEth(_zetaToken).transferFrom(
+             msg.sender,
+             address(this),
+             zetaValueAndGas
+        );
+        if (!(success1 && success2)) revert ErrorTransferringZeta();
+        // highlight-end
 
         connector.send(
-            ZetaInterfaces.SendInput({
+             ZetaInterfaces.SendInput({
                 destinationChainId: destinationChainId,
                 destinationAddress: interactorsByChainId[destinationChainId],
                 destinationGasLimit: 300000,
@@ -53,8 +94,41 @@ contract MultiChainValue is
                 zetaParams: abi.encode("")
             })
         );
-    }
 
+}
+
+    /**
+     * @dev Whitelist a chain to send Zeta
+     */
+    // highlight-start
+    function addAvailableChainId(
+        uint256 destinationChainId
+    ) external onlyOwner {
+        if (availableChainIds[destinationChainId])
+            revert ChainIdAlreadyEnabled();
+
+        availableChainIds[destinationChainId] = true;
+     }
+    // highlight-end
+ 
+
+    /**
+     * @dev Blacklist a chain to send Zeta
+     */
+    // highlight-start
+    function removeAvailableChainId(
+        uint256 destinationChainId
+    ) external onlyOwner {
+        if (!availableChainIds[destinationChainId])
+            revert ChainIdNotAvailable();
+
+        delete availableChainIds[destinationChainId];
+    }
+    // highlight-end
+
+    /**
+     * @dev If the destination chain is a valid chain, send the Zeta tokens to that chain
+     */
     function onZetaMessage(
         ZetaInterfaces.ZetaMessage calldata zetaMessage
     ) external override isValidMessageCall(zetaMessage) {
